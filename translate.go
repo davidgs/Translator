@@ -72,10 +72,12 @@ func xl(lang string, xlate string) string {
 	}
 	translated, err := translateTextWithModel(lang, xlate, "base")
 	checkError(err)
+	// Translation also inserts URL-encoded characters, so fix some of those
 	translatedUnquote := strings.ReplaceAll(translated, "&quot;", "\"")
 	translated = strings.ReplaceAll(translatedUnquote, "&#39;", "'")
 	translatedUnquote = strings.ReplaceAll(translated, "&gt;", ">")
 	translated = strings.ReplaceAll(translatedUnquote, "&lt;", ">")
+	// still have to figure out how to fix **bold** stuff because this didn't work.
 	// translatedUnquote = strings.ReplaceAll(translated, "** ", "**")
 	// translated = strings.ReplaceAll(translatedUnquote, " **", "**")
 
@@ -177,19 +179,7 @@ func doXlate(lang string, readFile string, writeFile string) {
 	file.Close()
 }
 
-func openFiles(readFile string, writeFile string) (io.Reader, os.File) {
-
-	file, err := os.Open(readFile)
-	checkError(err)
-	defer file.Close()
-
-	xfile, err := os.Create(writeFile)
-	checkError(err)
-	defer xfile.Close()
-
-	return file, *xfile
-}
-
+// future work for automagically translating all files.
 func getFile(path string, thisDir []fs.DirEntry, lang string) {
 	for _, f := range thisDir {
 		if f.IsDir() {
@@ -229,10 +219,11 @@ func getFile(path string, thisDir []fs.DirEntry, lang string) {
 		}
 	}
 }
+
 func main() {
 
-	langs := [3]string{"fr", "de", "es"}
-	dir := os.Args[1]
+	langs := [3]string{"fr", "de", "es"} // only doing these three languages right now
+	dir := os.Args[1] // only doing a directory passed in
 	for x := 0; x < len(langs); x++ {
 		lang := langs[x]
 		fmt.Print("Translating: \n" + dir + "\nTo: ")
@@ -246,29 +237,5 @@ func main() {
 		}
 		doXlate(lang, dir+"/index.en.md", dir+"/index."+lang+".md")
 	}
-	// foo := []byte("Así que una vez que estoy buscando otra oportunidad increíble en el espacio de la IO. Si usted ha leído a través de mi [sitio web] (https://davidgs.com) usted sabe que soy un pionero en la IO después de haber estado trabajando en la IO desde antes de que realmente era un IO. Eso sería [Proyecto Sun SPOT] (http://www.sunspotdev.org), que mató a Oracle o menos un año atrás. Estoy al menos seguir ayudando a que la comunidad viva un poco mediante la ejecución del nuevo sitio. Es curioso que después de todos estos años, todavía me contacté con regularidad por los usuarios del punto de Sun que todavía están utilizando la tecnología y que están en busca de apoyo.")
-	// fmt.Println(hexdump.Dump(foo))
-	//getFile(basePath, dirs, langs[x])
-	//}
-
-	//checkError(err)
-
-	// fmt.Println("\n******************\n")
-	// fmt.Println(TransBuff.String())
-	// fmt.Println("\n******************\n")
-	// foo, _ := ioutil.ReadFile("/Users/davidgs/github.com/DavidgsWeb/content/posts/pranks/door-prank/index.en.md")
-	// str := string(foo)
-	// fmt.Println(str)
-	// translated, err := gtranslate.TranslateWithParams(
-	// 	TransBuff.String(),
-	// 	gtranslate.TranslationParams{
-	// 		From: "en",
-	// 		To:   "fr",
-	// 	},
-	// )
-	// if err != nil {
-	// 	panic(err)
-	// }
-
-	// en: Hello World | ja: こんにちは世界
+	
 }
