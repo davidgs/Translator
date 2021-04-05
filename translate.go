@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
-	"io"
-	"io/fs"
 	"bufio"
 	"context"
+	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 
 	"cloud.google.com/go/translate"
@@ -17,23 +15,16 @@ import (
 
 // this is directly copy/pasted from Google example
 func translateTextWithModel(targetLanguage, text, model string) (string, error) {
-	// targetLanguage := "ja"
-	// text := "The Go Gopher is cute"
-	//model := "base"
-
 	ctx := context.Background()
-
 	lang, err := language.Parse(targetLanguage)
 	if err != nil {
 		return "", fmt.Errorf("language.Parse: %v", err)
 	}
-
 	client, err := translate.NewClient(ctx)
 	if err != nil {
 		return "", fmt.Errorf("translate.NewClient: %v", err)
 	}
 	defer client.Close()
-
 	resp, err := client.Translate(ctx, []string{text}, lang, &translate.Options{
 		Model: model, // Either "nmt" or "base".
 	})
@@ -46,81 +37,58 @@ func translateTextWithModel(targetLanguage, text, model string) (string, error) 
 	return resp[0].Text, nil
 }
 
-
+// I get tired of typing this all the time
 func checkError(err error) {
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
-func xl(lang string, xlate string) string {
+func xl(fromLang string, toLang string, xlate string) string {
 	// fix URLs because google translate changes [link](http://you.link) to
-	// [link] (http://your.link) and it *also* will trnaslate any path
+	// [link] (http://your.link) and it *also* will translate any path
 	// components, thus breaking your URLs.
-	var url []string
-	ind := bytes.Index([]byte(xlate), []byte("](")) // beginning of the url
-	var tmp = []byte(xlate)
-	for {
-		if ind < 0 {
+	reg := regexp.MustCompile(`]\([-a-zA-Z0-9@:%._\+~#=\/]{1,256}\)`)
+	// get all the URLs with a single RegEx, keep them for later.
+	var foundUrls [][]byte = reg.FindAll([]byte(xlate), -1)
+	translated, err := translateTextWithModel(toLang, xlate, "nmt")
+	checkError(err)
+	// a bunch of regexs to fix other broken stuff
+	reg = regexp.MustCompile(` (\*\*) ([A-za-z0-9]+) (\*\*)`) // fix bolds (**foo**)
+	translated = string(reg.ReplaceAll([]byte(translated), []byte(" $1$2$3")))
+	reg = regexp.MustCompile(`&quot;`) // fix escaped quotes
+	translated = string(reg.ReplaceAll([]byte(translated), []byte("\"")))
+	reg = regexp.MustCompile(`&gt;`) //fix >
+	translated = string(reg.ReplaceAll([]byte(translated), []byte(">")))
+	reg = regexp.MustCompile(`&lt;`) // fix <
+	translated = string(reg.ReplaceAll([]byte(translated), []byte("<")))
+	reg = regexp.MustCompile(`&#39;`) // fix '
+	translated = string(reg.ReplaceAll([]byte(translated), []byte("'")))
+	reg = regexp.MustCompile(` (\*) ([A-za-z0-9]+) (\*)`) // fix underline (*foo*)
+	translated = string(reg.ReplaceAll([]byte(translated), []byte("$1$2$3")))
+	reg = regexp.MustCompile(`({{)(<)[ ]{1,3}([vV]ideo)`) // fix video shortcodes
+	translated = string(reg.ReplaceAll([]byte(translated), []byte("$1$2 video")))
+	reg = regexp.MustCompile(`({{)(<)[ ]{1,3}([yY]outube)`) // fix youtube shortcodes
+	translated = string(reg.ReplaceAll([]byte(translated), []byte("$1$2 youtube")))
+	// Now it's time to go back and replace all the fucked up urls ...
+	reg = regexp.MustCompile(`] \([-a-zA-Z0-9@:%._\+~#=\/ ]{1,256}\)`)
+	for x := 0; x < len(foundUrls); x++ {
+		fmt.Println("FoundURL: ", string(foundUrls[x]))
+		tmp := reg.FindIndex([]byte(translated))
+		if tmp == nil {
 			break
 		}
-		n := tmp[ind+2:]
-		end := bytes.Index([]byte(n), []byte(")")) // end of the url
-		url = append(url, string(n[0:end]))
-		tmp = n[end:]
-		ind = bytes.Index([]byte(tmp), []byte("](")) // next url
+		t := []byte(translated)
+		translated = fmt.Sprintf("%s(%s%s", string(t[0:tmp[0]+1]), string(foundUrls[x][2:]), (string(t[tmp[1]:])))
 	}
-	translated, err := translateTextWithModel(lang, xlate, "base")
-	checkError(err)
-	// Translation also inserts URL-encoded characters, so fix some of those
-	translatedUnquote := strings.ReplaceAll(translated, "&quot;", "\"")
-	translated = strings.ReplaceAll(translatedUnquote, "&#39;", "'")
-	translatedUnquote = strings.ReplaceAll(translated, "&gt;", ">")
-	translated = strings.ReplaceAll(translatedUnquote, "&lt;", ">")
-	// still have to figure out how to fix **bold** stuff because this didn't work.
-	// translatedUnquote = strings.ReplaceAll(translated, "** ", "**")
-	// translated = strings.ReplaceAll(translatedUnquote, " **", "**")
-
-	// Now it's time to go back and replace all the fucked up urls ...
-	final := ""
-	if len(url) > 0 {
-		ind = bytes.Index([]byte(translated), []byte("] ("))
-		tmp = []byte(translated)
-		uInd := 0
-		for {
-			if ind < 0 {
-				break
-			}
-			start := ind + 2
-			n := tmp[ind+2:]
-			startString := string(tmp[0:start -1])
-			end := bytes.Index(n, []byte(")"))
-			final = final + startString + "(" + url[uInd]
-			uInd++
-			tmp = n[end:]
-			mid := bytes.Index([]byte(tmp), []byte(" ["))
-			if mid == -1 {
-				final = final + string(tmp[:])
-			} else {
-				final = final + string(tmp[:mid])
-			}
-			ind = bytes.Index([]byte(tmp), []byte("] ("))
-		}
-	}
-	if final == "" {
-		return translated
-	} else {
-		return final
-	}
-
+	return translated
 }
 
 // walk through the front matter, etc. and translate stuff
-func doXlate(lang string, readFile string, writeFile string) {
+func doXlate(from string, lang string, readFile string, writeFile string) {
 	file, err := os.Open(readFile)
 	checkError(err)
 	defer file.Close()
-
 	xfile, err := os.Create(writeFile)
 	checkError(err)
 	defer xfile.Close()
@@ -129,6 +97,10 @@ func doXlate(lang string, readFile string, writeFile string) {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		ln := scanner.Text()
+		if strings.HasPrefix(ln, "{{") {
+			xfile.WriteString(ln + "\n")
+			continue
+		}
 		if strings.HasPrefix(ln, "```") { // deal with in-line code
 			xfile.WriteString(ln + "\n")
 			code = !code
@@ -145,26 +117,24 @@ func doXlate(lang string, readFile string, writeFile string) {
 			if strings.HasPrefix(ln, "!") { // translate the ALT-TEXT not the image path
 				bar := strings.Split(ln, "]")
 				desc := strings.Split(bar[0], "[")
-				translated := xl(lang, desc[1])
+				translated := xl(from, lang, desc[1])
 				xfile.WriteString("![" + translated + "]" + bar[1] + "\n")
 
-			}  else { // blank lines and everything else
+			} else { // blank lines and everything else
 				if ln == "" { // handle blank lines.
 					xfile.WriteString("\n")
 				} else { // everything else
-					translated := xl(lang, ln)
+					translated := xl(from, lang, ln)
 					xfile.WriteString(translated + "\n")
-
 				}
 			}
-
 		} else { // handle header fields
 			headString := strings.Split(ln, ":")
 			if headString[0] == "title" { // title
-				translated := xl(lang, headString[1])
+				translated := xl(from, lang, headString[1])
 				xfile.WriteString(headString[0] + ": " + translated + "\n")
 			} else if headString[0] == "description" { // description
-				translated := xl(lang, headString[1])
+				translated := xl(from, lang, headString[1])
 				xfile.WriteString(headString[0] + ": " + translated + "\n")
 			} else { // all other header fields left as-is
 				xfile.WriteString(ln + "\n")
@@ -174,56 +144,55 @@ func doXlate(lang string, readFile string, writeFile string) {
 	if err := scanner.Err(); err != nil {
 		log.Fatal(err)
 	}
-
 	xfile.Close()
 	file.Close()
 }
 
+// is a value in the array?
+func isValueInList(value string, list []string) bool { // Test Written
+	for _, v := range list {
+		if v == value {
+			return true
+		}
+	}
+	return false
+}
+
 // future work for automagically translating all files.
-func getFile(path string, thisDir []fs.DirEntry, lang string) {
+func getFile(from string, path string, lang string) {
+	thisDir, err := os.ReadDir(path)
+	checkError(err)
 	for _, f := range thisDir {
 		if f.IsDir() {
-
 			if f.Name() == "images" {
 				continue
 			}
-			fmt.Print(path)
-			fmt.Print("/")
-			fmt.Println(f.Name())
-			dirs, err := os.ReadDir(path + "/" + f.Name())
-			checkError(err)
-
-			getFile(path+"/"+f.Name(), dirs, lang)
-
+			getFile(from, path+"/"+f.Name(), lang) // fucking hell, recursion!
 		} else {
-			if f.Name() == "_index"+"."+lang+"."+"md" || f.Name() == "index"+"."+lang+"."+"md" {
-				continue
-			}
-			if f.Name() == "_index.en.md" {
-				continue
-				// checkFile := path + "/_index." + lang + ".md"
-				// _, err := os.Stat(checkFile)
-				// if os.IsNotExist(err) {
-				// 	// readFile, writeFile := openFiles( )
-				// 	doXlate(lang, path + "/" + f.Name(), path + "/_index." + lang + ".md")
-				// }
-			}
-			if f.Name() == "index.en.md" {
-				checkFile := path + "/index." + lang + ".md"
-				_, err := os.Stat(checkFile)
-				if os.IsNotExist(err) {
-					//readFile, writeFile := openFiles(path + "/" + f.Name(), path + "/index." + lang + ".md")
-					doXlate(lang, path+"/"+f.Name(), path+"/index."+lang+".md")
+			if strings.Split(f.Name(), ".")[0] == "_index." || strings.Split(f.Name(), ".")[0] == "index." {
+				fromFile := fmt.Sprintf("%s/%s.%s.md", path, strings.Split(f.Name(), ".")[0], from)
+				toFile := fmt.Sprintf("%s/%s.%s.md", path, strings.Split(f.Name(), ".")[0], lang)
+				//TODO Fix this!
+
+				_, err := os.Stat(toFile)
+				if !os.IsNotExist(err) {
+					//	fmt.Printf("Already translated:\t %s/index.%s.md\n", path, lang)
+					continue
 				}
+				//fmt.Printf("Found a file to translate:\t %s/%s\n", path, f.Name())
+				fmt.Printf("Translating:\t %s\nto: \t\t%s\n", fromFile, toFile)
+				doXlate(from, lang, fromFile, toFile)
+				// }
+				continue
 			}
 		}
 	}
 }
 
 func main() {
-
-	langs := [3]string{"fr", "de", "es"} // only doing these three languages right now
-	dir := os.Args[1] // only doing a directory passed in
+	fromLang := "en"
+	langs := [4]string{"nl", "fr", "de", "es"} // only doing these four languages right now
+	dir := os.Args[1]                          // only doing a directory passed in
 	for x := 0; x < len(langs); x++ {
 		lang := langs[x]
 		fmt.Print("Translating: \n" + dir + "\nTo: ")
@@ -234,8 +203,22 @@ func main() {
 			fmt.Println("French")
 		case "de":
 			fmt.Println("German")
+		case "nl":
+			fmt.Println("Dutch")
 		}
-		doXlate(lang, dir+"/index.en.md", dir+"/index."+lang+".md")
+		fi, err := os.Stat(dir)
+		checkError(err)
+		switch mode := fi.Mode(); {
+		case mode.IsDir():
+			// do directory stuff
+			getFile(fromLang, dir, lang)
+		case mode.IsRegular(): // we're just doing one file
+			pt := strings.Split(dir, "/")
+			fn := strings.Split(pt[len(pt)-1], ".")
+			path := strings.TrimRight(dir, pt[len(pt)-1])
+			writeFile := fmt.Sprintf("%s%s.%s.%s", path, fn[0], lang, fn[len(fn)-1])
+			doXlate(fromLang, lang, dir, writeFile)
+		}
 	}
-	
+
 }
