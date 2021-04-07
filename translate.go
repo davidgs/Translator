@@ -10,17 +10,28 @@ import (
 	"strings"
 
 	"cloud.google.com/go/translate"
+	"google.golang.org/api/option"
 	"golang.org/x/text/language"
 )
 
+func AuthTranslate(jsonPath, projectID string) (*translate.Client, context.Context, error){
+	ctx := context.Background()
+	client, err := translate.NewClient(ctx, option.WithCredentialsFile(jsonPath))
+	if err != nil {
+		log.Fatal(err)
+		return client, ctx, err
+	}
+	return client, ctx, nil
+
+}
 // this is directly copy/pasted from Google example
 func translateTextWithModel(targetLanguage, text, model string) (string, error) {
-	ctx := context.Background()
+
 	lang, err := language.Parse(targetLanguage)
 	if err != nil {
 		return "", fmt.Errorf("language.Parse: %v", err)
 	}
-	client, err := translate.NewClient(ctx)
+	client, ctx, err := AuthTranslate("micro-cacao-297616-fdd1edb1a227.json", "103373479946395174633")
 	if err != nil {
 		return "", fmt.Errorf("translate.NewClient: %v", err)
 	}
@@ -119,7 +130,6 @@ func doXlate(from string, lang string, readFile string, writeFile string) {
 				desc := strings.Split(bar[0], "[")
 				translated := xl(from, lang, desc[1])
 				xfile.WriteString("![" + translated + "]" + bar[1] + "\n")
-
 			} else { // blank lines and everything else
 				if ln == "" { // handle blank lines.
 					xfile.WriteString("\n")
@@ -167,19 +177,20 @@ func getFile(from string, path string, lang string) {
 			if f.Name() == "images" {
 				continue
 			}
+			fmt.Println("going into ", path + "/" + f.Name())
 			getFile(from, path+"/"+f.Name(), lang) // fucking hell, recursion!
 		} else {
-			if strings.Split(f.Name(), ".")[0] == "_index." || strings.Split(f.Name(), ".")[0] == "index." {
+			if strings.Split(f.Name(), ".")[0] == "_index" || strings.Split(f.Name(), ".")[0] == "index" {
 				fromFile := fmt.Sprintf("%s/%s.%s.md", path, strings.Split(f.Name(), ".")[0], from)
 				toFile := fmt.Sprintf("%s/%s.%s.md", path, strings.Split(f.Name(), ".")[0], lang)
-				//TODO Fix this!
-
+				// fmt.Println("From: ", fromFile)
+				// fmt.Println(toFile)
 				_, err := os.Stat(toFile)
 				if !os.IsNotExist(err) {
-					//	fmt.Printf("Already translated:\t %s/index.%s.md\n", path, lang)
+					fmt.Printf("Already translated:\t %s/index.%s.md\n", path, lang)
 					continue
 				}
-				//fmt.Printf("Found a file to translate:\t %s/%s\n", path, f.Name())
+				// fmt.Printf("Found a file to translate:\t %s/%s\n", path, f.Name())
 				fmt.Printf("Translating:\t %s\nto: \t\t%s\n", fromFile, toFile)
 				doXlate(from, lang, fromFile, toFile)
 				// }
