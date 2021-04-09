@@ -84,7 +84,7 @@ func xl(fromLang string, toLang string, xlate string) string {
 	// Now it's time to go back and replace all the fucked up urls ...
 	reg = regexp.MustCompile(`] \([-a-zA-Z0-9@:%._\+~#=\/ ]{1,256}\)`)
 	for x := 0; x < len(foundUrls); x++ {
-		fmt.Println("FoundURL: ", string(foundUrls[x]))
+		// fmt.Println("FoundURL: ", string(foundUrls[x]))
 		tmp := reg.FindIndex([]byte(translated))
 		if tmp == nil {
 			break
