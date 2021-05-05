@@ -31,7 +31,7 @@ func translateTextWithModel(targetLanguage, text, model string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("language.Parse: %v", err)
 	}
-	client, ctx, err := AuthTranslate("micro-cacao-297616-fdd1edb1a227.json", "103373479946395174633")
+	client, ctx, err := AuthTranslate("google-secret.json", "103373479946395174633")
 	if err != nil {
 		return "", fmt.Errorf("translate.NewClient: %v", err)
 	}
