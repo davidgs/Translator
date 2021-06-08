@@ -177,7 +177,7 @@ func getFile(from string, path string, lang string) {
 			if f.Name() == "images" {
 				continue
 			}
-			fmt.Println("going into ", path + "/" + f.Name())
+			//fmt.Println("going into ", path + "/" + f.Name())
 			getFile(from, path+"/"+f.Name(), lang) // fucking hell, recursion!
 		} else {
 			if strings.Split(f.Name(), ".")[0] == "_index" || strings.Split(f.Name(), ".")[0] == "index" {
@@ -187,7 +187,7 @@ func getFile(from string, path string, lang string) {
 				// fmt.Println(toFile)
 				_, err := os.Stat(toFile)
 				if !os.IsNotExist(err) {
-					fmt.Printf("Already translated:\t %s/index.%s.md\n", path, lang)
+					// fmt.Printf("Already translated:\t %s/index.%s.md\n", path, lang)
 					continue
 				}
 				// fmt.Printf("Found a file to translate:\t %s/%s\n", path, f.Name())
@@ -206,17 +206,17 @@ func main() {
 	dir := os.Args[1]                          // only doing a directory passed in
 	for x := 0; x < len(langs); x++ {
 		lang := langs[x]
-		fmt.Print("Translating: \n" + dir + "\nTo: ")
-		switch lang {
-		case "es":
-			fmt.Println("Spanish")
-		case "fr":
-			fmt.Println("French")
-		case "de":
-			fmt.Println("German")
-		case "nl":
-			fmt.Println("Dutch")
-		}
+		// fmt.Print("Translating: \n" + dir + "\nTo: ")
+		// switch lang {
+		// case "es":
+		// 	fmt.Println("Spanish")
+		// case "fr":
+		// 	fmt.Println("French")
+		// case "de":
+		// 	fmt.Println("German")
+		// case "nl":
+		// 	fmt.Println("Dutch")
+		// }
 		fi, err := os.Stat(dir)
 		checkError(err)
 		switch mode := fi.Mode(); {
