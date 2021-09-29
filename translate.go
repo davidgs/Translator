@@ -10,11 +10,12 @@ import (
 	"strings"
 
 	"cloud.google.com/go/translate"
-	"google.golang.org/api/option"
+	readingtime "github.com/begmaroman/reading-time"
 	"golang.org/x/text/language"
+	"google.golang.org/api/option"
 )
 
-func AuthTranslate(jsonPath, projectID string) (*translate.Client, context.Context, error){
+func AuthTranslate(jsonPath, projectID string) (*translate.Client, context.Context, error) {
 	ctx := context.Background()
 	client, err := translate.NewClient(ctx, option.WithCredentialsFile(jsonPath))
 	if err != nil {
@@ -24,6 +25,7 @@ func AuthTranslate(jsonPath, projectID string) (*translate.Client, context.Conte
 	return client, ctx, nil
 
 }
+
 // this is directly copy/pasted from Google example
 func translateTextWithModel(targetLanguage, text, model string) (string, error) {
 
@@ -187,9 +189,14 @@ func getFile(from string, path string, lang string) {
 				// fmt.Println(toFile)
 				_, err := os.Stat(toFile)
 				if !os.IsNotExist(err) {
+					if !(strings.Split(f.Name(), ".")[0] == "_index") {
+						addReadingTime(fromFile)
+						addReadingTime(toFile)
+					}
 					// fmt.Printf("Already translated:\t %s/index.%s.md\n", path, lang)
 					continue
 				}
+				addReadingTime(fromFile) // get the reading time first.
 				// fmt.Printf("Found a file to translate:\t %s/%s\n", path, f.Name())
 				fmt.Printf("Translating:\t %s\nto: \t\t%s\n", fromFile, toFile)
 				doXlate(from, lang, fromFile, toFile)
@@ -198,6 +205,33 @@ func getFile(from string, path string, lang string) {
 			}
 		}
 	}
+}
+
+func addReadingTime(file string) {
+	// fmt.Println("Reading: ", file)
+	f, err := os.ReadFile(file)
+	if strings.Index(string(f), "reading_time:") > 0 {
+		return
+	}
+	checkError(err)
+	estimation := readingtime.Estimate(string(f))
+	fm := strings.LastIndex(string(f), "---")
+	newArt := f[:fm]
+	fw, err := os.Create(file)
+	checkError(err)
+	defer fw.Close()
+	fw.WriteString(string(newArt))
+	mins := int(estimation.Duration.Minutes())
+	dur := ""
+	if mins > 1 {
+	dur = fmt.Sprintf("reading_time: %d minutes\n", mins)
+	} else if mins == 1 {
+	dur = fmt.Sprintf("reading_time: %d minute\n", mins)
+	} else {
+	}
+	fw.WriteString(dur)
+	fw.WriteString(string(f[fm:]))
+	fw.Close()
 }
 
 func main() {
