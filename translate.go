@@ -15,6 +15,13 @@ import (
 	"google.golang.org/api/option"
 )
 
+type Translation struct {
+  DefaultLanguage string   `json:"default_language"`
+  Languages   []string `json:"languages"`
+  FilePath    string `json:"file_path"`
+  FileNames   []string `json:"file_names"`
+}
+
 func AuthTranslate(jsonPath, projectID string) (*translate.Client, context.Context, error) {
 	ctx := context.Background()
 	client, err := translate.NewClient(ctx, option.WithCredentialsFile(jsonPath))
@@ -132,6 +139,8 @@ func doXlate(from string, lang string, readFile string, writeFile string) {
 				desc := strings.Split(bar[0], "[")
 				translated := xl(from, lang, desc[1])
 				xfile.WriteString("![" + translated + "]" + bar[1] + "\n")
+      } else if strings.HasPrefix(ln, "> [!") { // callouts don't get translated
+        xfile.WriteString(ln + "\n")
 			} else { // blank lines and everything else
 				if ln == "" { // handle blank lines.
 					xfile.WriteString("\n")
