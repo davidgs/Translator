@@ -1,12 +1,7 @@
 name: Tests
 
 on:
-  push:
-    branches:
-      - '*'  # Run on all branches
   pull_request:
-    branches:
-      - '*'  # Also run on PRs to any branch
 
 jobs:
   test:
@@ -36,9 +31,9 @@ jobs:
       - name: Create Secret
         uses: jsdaniell/create-json@1.1.2
         with:
-          name: "./translate/google-secret.json"
+          name: "./google-secret.json"
           json: ${{ secrets.TRANSLATE_SECRET }}
-          
+
       - name: Run tests
         run: go test -v ./...
 
