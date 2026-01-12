@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
+	"time"
 
 	"cloud.google.com/go/translate"
 	readingtime "github.com/begmaroman/reading-time"
@@ -41,9 +42,45 @@ type Translator struct {
 	htmlEntities map[string]string
 }
 
+// unquoteYAML removes quotes from YAML string values
+func unquoteYAML(value string) string {
+	// Handle double quotes
+	if strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"") {
+		// Unescape escaped quotes and other characters
+		unquoted := value[1 : len(value)-1]
+		unquoted = strings.ReplaceAll(unquoted, "\\\"", "\"")
+		unquoted = strings.ReplaceAll(unquoted, "\\\\", "\\")
+		return unquoted
+	}
+	// Handle single quotes
+	if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
+		return value[1 : len(value)-1]
+	}
+	return value
+}
+
 // NewTranslator creates a new Translator instance with initialized client and compiled regex patterns
 func NewTranslator(credentialsPath string) (*Translator, error) {
 	ctx := context.Background()
+	
+	// Read the credentials file to extract the project ID
+	credData, err := os.ReadFile(credentialsPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read credentials file: %w", err)
+	}
+	
+	var credJSON map[string]interface{}
+	if err := json.Unmarshal(credData, &credJSON); err != nil {
+		return nil, fmt.Errorf("failed to parse credentials JSON: %w", err)
+	}
+	
+	projectID, ok := credJSON["project_id"].(string)
+	if !ok || projectID == "" {
+		return nil, fmt.Errorf("project_id not found in credentials file")
+	}
+	
+	log.Printf("Using Google Cloud project: %s", projectID)
+	
 	client, err := translate.NewClient(ctx, option.WithCredentialsFile(credentialsPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create translate client: %w", err)
@@ -84,23 +121,75 @@ func (t *Translator) translateBatch(targetLanguage string, texts []string, model
 		return []string{}, nil
 	}
 
+	// Filter out empty and whitespace-only strings before sending to API
+	filteredTexts := make([]string, 0, len(texts))
+	originalIndices := make([]int, 0, len(texts))
+	for i, text := range texts {
+		trimmed := strings.TrimSpace(text)
+		if trimmed != "" {
+			filteredTexts = append(filteredTexts, text)
+			originalIndices = append(originalIndices, i)
+		}
+	}
+
+	if len(filteredTexts) == 0 {
+		// Return empty strings for all inputs if all were filtered out
+		return make([]string, len(texts)), nil
+	}
+
 	lang, err := language.Parse(targetLanguage)
 	if err != nil {
-		return nil, fmt.Errorf("language.Parse: %w", err)
+		return nil, fmt.Errorf("language.Parse failed for '%s': %w", targetLanguage, err)
 	}
 
-	resp, err := t.client.Translate(t.ctx, texts, lang, &translate.Options{
-		Model: model,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("Translate: %w", err)
-	}
+	// Process in smaller batches to avoid API limits
+	const maxBatchSize = 10
+	allResults := make([]string, len(texts))
+	
+	// Process in chunks
+	for batchStart := 0; batchStart < len(filteredTexts); batchStart += maxBatchSize {
+		batchEnd := batchStart + maxBatchSize
+		if batchEnd > len(filteredTexts) {
+			batchEnd = len(filteredTexts)
+		}
+		
+		batchTexts := filteredTexts[batchStart:batchEnd]
+		
+		log.Printf("Translating batch of %d texts to language '%s' (batch %d of %d)", 
+			len(batchTexts), targetLanguage, batchStart/maxBatchSize+1, (len(filteredTexts)+maxBatchSize-1)/maxBatchSize)
+		if len(batchTexts) > 0 {
+			log.Printf("First text in batch (length %d): %q", len(batchTexts[0]), batchTexts[0])
+		}
+		
+		resp, err := t.client.Translate(t.ctx, batchTexts, lang, &translate.Options{
+			Model: model,
+		})
+		if err != nil {
+			log.Printf("Translation failed for language '%s' with %d texts in batch", targetLanguage, len(batchTexts))
+			if len(batchTexts) > 0 {
+				log.Printf("First text being translated: %q", batchTexts[0])
+			}
+			return nil, fmt.Errorf("Translate: %w", err)
+		}
 
-	results := make([]string, len(resp))
-	for i, r := range resp {
-		results[i] = r.Text
+		if len(resp) != len(batchTexts) {
+			return nil, fmt.Errorf("translation response length mismatch: expected %d, got %d", len(batchTexts), len(resp))
+		}
+
+		// Map translations back to original positions
+		for i, respIdx := range originalIndices[batchStart:batchEnd] {
+			if batchStart+i < len(resp) {
+				allResults[respIdx] = resp[i].Text
+			}
+		}
+		
+		// Add a small delay between batches to avoid rate limiting
+		if batchEnd < len(filteredTexts) {
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
-	return results, nil
+	
+	return allResults, nil
 }
 
 // translateText translates a single text string
@@ -254,17 +343,23 @@ func (t *Translator) doXlate(from string, lang string, readFile string, writeFil
 			headString := strings.SplitN(ln, ":", 2)
 			if len(headString) == 2 {
 				if headString[0] == "title" {
+					titleValue := strings.TrimSpace(headString[1])
+					// Remove quotes from YAML string values
+					titleValue = unquoteYAML(titleValue)
 					segments = append(segments, segment{
 						index:    segmentIndex,
-						text:     strings.TrimSpace(headString[1]),
+						text:     titleValue,
 						lineType: "title",
 						original: ln,
 					})
 					segmentIndex++
 				} else if headString[0] == "description" {
+					descValue := strings.TrimSpace(headString[1])
+					// Remove quotes from YAML string values
+					descValue = unquoteYAML(descValue)
 					segments = append(segments, segment{
 						index:    segmentIndex,
-						text:     strings.TrimSpace(headString[1]),
+						text:     descValue,
 						lineType: "description",
 						original: ln,
 					})
@@ -288,7 +383,9 @@ func (t *Translator) doXlate(from string, lang string, readFile string, writeFil
 	textsToTranslate := make([]string, 0)
 	translatableIndices := make([]int, 0)
 	for i, seg := range segments {
-		if seg.text != "" {
+		// Filter out empty strings and whitespace-only strings
+		trimmedText := strings.TrimSpace(seg.text)
+		if trimmedText != "" {
 			textsToTranslate = append(textsToTranslate, seg.text)
 			translatableIndices = append(translatableIndices, i)
 		}
@@ -300,16 +397,34 @@ func (t *Translator) doXlate(from string, lang string, readFile string, writeFil
 		if err != nil {
 			return fmt.Errorf("batch translation failed: %w", err)
 		}
+		if len(translations) != len(textsToTranslate) {
+			return fmt.Errorf("translation count mismatch: expected %d, got %d", len(textsToTranslate), len(translations))
+		}
+	}
+
+	// Create a map of segment index to translation
+	translationMap := make(map[int]string)
+	for i, origIdx := range translatableIndices {
+		if i < len(translations) {
+			translationMap[origIdx] = translations[i]
+		}
 	}
 
 	// Apply post-translation fixes and build output
-	translationIndex := 0
-	for _, seg := range segments {
+	for i, seg := range segments {
 		if seg.lineType == "literal" {
 			builder.WriteString(seg.original)
+		} else if strings.TrimSpace(seg.text) == "" {
+			// If segment has no text to translate, write original
+			builder.WriteString(seg.original)
+			if !strings.HasSuffix(seg.original, "\n") {
+				builder.WriteString("\n")
+			}
 		} else {
-			translated := translations[translationIndex]
-			translationIndex++
+			translated, exists := translationMap[i]
+			if !exists {
+				return fmt.Errorf("no translation found for segment %d", i)
+			}
 
 			// Apply post-translation fixes
 			fixed := t.applyPostTranslationFixes(seg.text, translated)
@@ -551,46 +666,45 @@ func main() {
 		log.Fatalf("Failed to stat path %s: %v", dir, err)
 	}
 
-	// Process languages in parallel
-	var wg sync.WaitGroup
-	var mu sync.Mutex
+	// Process languages sequentially to avoid rate limiting
 	var errors []error
 
 	for _, lang := range targetLanguages {
-		wg.Add(1)
-		go func(targetLang string) {
-			defer wg.Done()
-
-			var err error
-			switch mode := fi.Mode(); {
-			case mode.IsDir():
-				err = translator.getFile(config.DefaultLanguage, dir, targetLang, fileNames)
-			case mode.IsRegular():
-				pt := strings.Split(dir, "/")
-				fn := strings.Split(pt[len(pt)-1], ".")
-				if len(fn) < 2 {
-					err = fmt.Errorf("invalid file name format: %s", dir)
+		targetLang := lang
+		
+		var err error
+		switch mode := fi.Mode(); {
+		case mode.IsDir():
+			err = translator.getFile(config.DefaultLanguage, dir, targetLang, fileNames)
+		case mode.IsRegular():
+			fileName := filepath.Base(dir)
+			dirPath := filepath.Dir(dir)
+			fn := strings.Split(fileName, ".")
+			if len(fn) < 2 {
+				err = fmt.Errorf("invalid file name format: %s", dir)
+			} else {
+				// Only process .md files
+				if fn[len(fn)-1] != "md" {
+					err = fmt.Errorf("only markdown (.md) files are supported, got: %s", fn[len(fn)-1])
 				} else {
-					// Only process .md files
-					if fn[len(fn)-1] != "md" {
-						err = fmt.Errorf("only markdown (.md) files are supported, got: %s", fn[len(fn)-1])
-					} else {
-						path := strings.TrimRight(dir, pt[len(pt)-1])
-						writeFile := fmt.Sprintf("%s%s.%s.%s", path, fn[0], targetLang, fn[len(fn)-1])
-						err = translator.doXlate(config.DefaultLanguage, targetLang, dir, writeFile)
-					}
+					// Extract base name (everything before the language code)
+					// For "index.en.md", baseName would be "index"
+					baseName := fn[0]
+					writeFile := filepath.Join(dirPath, fmt.Sprintf("%s.%s.%s", baseName, targetLang, fn[len(fn)-1]))
+					err = translator.doXlate(config.DefaultLanguage, targetLang, dir, writeFile)
 				}
 			}
+		}
 
-			if err != nil {
-				mu.Lock()
-				errors = append(errors, fmt.Errorf("language %s: %w", targetLang, err))
-				mu.Unlock()
-			}
-		}(lang)
+		if err != nil {
+			errors = append(errors, fmt.Errorf("language %s: %w", targetLang, err))
+		}
+		
+		// Small delay between language translations to avoid API rate limits
+		if len(targetLanguages) > 1 {
+			time.Sleep(500 * time.Millisecond)
+		}
 	}
-
-	wg.Wait()
 
 	if len(errors) > 0 {
 		log.Fatalf("Translation errors occurred:\n%v", errors)
