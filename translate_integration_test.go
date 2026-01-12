@@ -277,7 +277,8 @@ title: Test Article
 	}
 
 	// Test that getFile processes the structure correctly
-	err = translator.getFile("en", tmpDir, "fr")
+	fileNames := []string{"index", "_index"}
+	err = translator.getFile("en", tmpDir, "fr", fileNames)
 	if err != nil {
 		t.Errorf("getFile failed: %v", err)
 	}
