@@ -53,5 +53,7 @@ Temporary Items
 .apdisk
 
 # End of https://www.toptal.com/developers/gitignore/api/macos,go
-google-secret.json
+google-secret*.json
 micro-cacao-297616-fdd1edb1a227.json
+.env
+translate

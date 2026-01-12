@@ -1,0 +1,5 @@
+{
+  "languages": ["en", "es", "fr", "de", "nl"],
+  "default_language": "en",
+  "file_names": [ "_index", "index", "about" ]
+}
