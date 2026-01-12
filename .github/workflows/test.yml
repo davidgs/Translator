@@ -11,4 +11,29 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
-     
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.5'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Create Secret
+        uses: jsdaniell/create-json@1.1.2
+        with:
+          name: "./google-secret.json"
+          json: ${{ secrets.TRANSLATE_SECRET }}
+
+      - name: Run tests
+        run: go test -v ./...
+
+      - name: Run tests with coverage
+        run: go test -v -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          file: ./coverage.out
+          fail_ci_if_error: true
