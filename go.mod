@@ -5,8 +5,10 @@ go 1.23.0
 require (
 	cloud.google.com/go v0.79.0
 	github.com/begmaroman/reading-time v0.0.0-20200518075747-77e4aae57578
+	github.com/pelletier/go-toml/v2 v2.2.3
 	golang.org/x/text v0.3.5
 	google.golang.org/api v0.42.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
