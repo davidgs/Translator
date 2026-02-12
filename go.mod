@@ -1,12 +1,14 @@
 module davidgs.com/main
 
-go 1.21
+go 1.23.0
 
 require (
 	cloud.google.com/go v0.79.0
 	github.com/begmaroman/reading-time v0.0.0-20200518075747-77e4aae57578
+	github.com/pelletier/go-toml/v2 v2.2.3
 	golang.org/x/text v0.3.5
 	google.golang.org/api v0.42.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -15,7 +17,7 @@ require (
 	github.com/googleapis/gax-go/v2 v2.0.5 // indirect
 	go.opencensus.io v0.23.0 // indirect
 	golang.org/x/net v0.0.0-20210316092652-d523dce5a7f4 // indirect
-	golang.org/x/oauth2 v0.0.0-20210313182246-cd4f82c27b84 // indirect
+	golang.org/x/oauth2 v0.27.0 // indirect
 	golang.org/x/sys v0.0.0-20210316164454-77fc1eacc6aa // indirect
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/genproto v0.0.0-20210315173758-2651cd453018 // indirect

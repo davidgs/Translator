@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -14,8 +15,10 @@ import (
 
 	"cloud.google.com/go/translate"
 	readingtime "github.com/begmaroman/reading-time"
+	"github.com/pelletier/go-toml/v2"
 	"golang.org/x/text/language"
 	"google.golang.org/api/option"
+	"gopkg.in/yaml.v3"
 )
 
 type Translation struct {
@@ -29,15 +32,16 @@ type Translation struct {
 
 // Translator holds the translate client, context, and compiled regex patterns
 type Translator struct {
-	client  *translate.Client
-	ctx     context.Context
-	regexes struct {
-		urlExtract      *regexp.Regexp
-		boldFix         *regexp.Regexp
-		underlineFix    *regexp.Regexp
-		videoShortcode  *regexp.Regexp
+	client         *translate.Client
+	ctx            context.Context
+	batchTranslate func(targetLanguage string, texts []string, model string) ([]string, error)
+	regexes        struct {
+		urlExtract       *regexp.Regexp
+		boldFix          *regexp.Regexp
+		underlineFix     *regexp.Regexp
+		videoShortcode   *regexp.Regexp
 		youtubeShortcode *regexp.Regexp
-		urlReplace      *regexp.Regexp
+		urlReplace       *regexp.Regexp
 	}
 	htmlEntities map[string]string
 }
@@ -62,25 +66,25 @@ func unquoteYAML(value string) string {
 // NewTranslator creates a new Translator instance with initialized client and compiled regex patterns
 func NewTranslator(credentialsPath string) (*Translator, error) {
 	ctx := context.Background()
-	
+
 	// Read the credentials file to extract the project ID
 	credData, err := os.ReadFile(credentialsPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read credentials file: %w", err)
 	}
-	
+
 	var credJSON map[string]interface{}
 	if err := json.Unmarshal(credData, &credJSON); err != nil {
 		return nil, fmt.Errorf("failed to parse credentials JSON: %w", err)
 	}
-	
+
 	projectID, ok := credJSON["project_id"].(string)
 	if !ok || projectID == "" {
 		return nil, fmt.Errorf("project_id not found in credentials file")
 	}
-	
+
 	log.Printf("Using Google Cloud project: %s", projectID)
-	
+
 	client, err := translate.NewClient(ctx, option.WithCredentialsFile(credentialsPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create translate client: %w", err)
@@ -117,6 +121,10 @@ func (t *Translator) Close() error {
 
 // translateBatch translates multiple texts at once for efficiency
 func (t *Translator) translateBatch(targetLanguage string, texts []string, model string) ([]string, error) {
+	if t.batchTranslate != nil {
+		return t.batchTranslate(targetLanguage, texts, model)
+	}
+
 	if len(texts) == 0 {
 		return []string{}, nil
 	}
@@ -145,22 +153,22 @@ func (t *Translator) translateBatch(targetLanguage string, texts []string, model
 	// Process in smaller batches to avoid API limits
 	const maxBatchSize = 10
 	allResults := make([]string, len(texts))
-	
+
 	// Process in chunks
 	for batchStart := 0; batchStart < len(filteredTexts); batchStart += maxBatchSize {
 		batchEnd := batchStart + maxBatchSize
 		if batchEnd > len(filteredTexts) {
 			batchEnd = len(filteredTexts)
 		}
-		
+
 		batchTexts := filteredTexts[batchStart:batchEnd]
-		
-		log.Printf("Translating batch of %d texts to language '%s' (batch %d of %d)", 
+
+		log.Printf("Translating batch of %d texts to language '%s' (batch %d of %d)",
 			len(batchTexts), targetLanguage, batchStart/maxBatchSize+1, (len(filteredTexts)+maxBatchSize-1)/maxBatchSize)
 		if len(batchTexts) > 0 {
 			log.Printf("First text in batch (length %d): %q", len(batchTexts[0]), batchTexts[0])
 		}
-		
+
 		resp, err := t.client.Translate(t.ctx, batchTexts, lang, &translate.Options{
 			Model: model,
 		})
@@ -182,13 +190,13 @@ func (t *Translator) translateBatch(targetLanguage string, texts []string, model
 				allResults[respIdx] = resp[i].Text
 			}
 		}
-		
+
 		// Add a small delay between batches to avoid rate limiting
 		if batchEnd < len(filteredTexts) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
-	
+
 	return allResults, nil
 }
 
@@ -342,7 +350,8 @@ func (t *Translator) doXlate(from string, lang string, readFile string, writeFil
 		} else {
 			headString := strings.SplitN(ln, ":", 2)
 			if len(headString) == 2 {
-				if headString[0] == "title" {
+				switch headString[0] {
+				case "title":
 					titleValue := strings.TrimSpace(headString[1])
 					// Remove quotes from YAML string values
 					titleValue = unquoteYAML(titleValue)
@@ -353,7 +362,7 @@ func (t *Translator) doXlate(from string, lang string, readFile string, writeFil
 						original: ln,
 					})
 					segmentIndex++
-				} else if headString[0] == "description" {
+				case "description":
 					descValue := strings.TrimSpace(headString[1])
 					// Remove quotes from YAML string values
 					descValue = unquoteYAML(descValue)
@@ -364,7 +373,7 @@ func (t *Translator) doXlate(from string, lang string, readFile string, writeFil
 						original: ln,
 					})
 					segmentIndex++
-				} else {
+				default:
 					segments = append(segments, segment{index: segmentIndex, original: ln + "\n", lineType: "literal"})
 					segmentIndex++
 				}
@@ -553,6 +562,283 @@ func (t *Translator) getFile(from string, path string, lang string, fileNames []
 	return nil
 }
 
+type stringSetter struct {
+	original string
+	set      func(string)
+}
+
+func collectStringSetters(value interface{}, setters *[]stringSetter) {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		for key, item := range v {
+			if str, ok := item.(string); ok {
+				k := key
+				original := str
+				*setters = append(*setters, stringSetter{
+					original: original,
+					set: func(newVal string) {
+						v[k] = newVal
+					},
+				})
+			} else {
+				collectStringSetters(item, setters)
+			}
+		}
+	case []interface{}:
+		for i, item := range v {
+			if str, ok := item.(string); ok {
+				idx := i
+				original := str
+				*setters = append(*setters, stringSetter{
+					original: original,
+					set: func(newVal string) {
+						v[idx] = newVal
+					},
+				})
+			} else {
+				collectStringSetters(item, setters)
+			}
+		}
+	}
+}
+
+func collectYAMLStringSetters(node *yaml.Node, setters *[]stringSetter, isKey bool) {
+	if node == nil {
+		return
+	}
+
+	switch node.Kind {
+	case yaml.DocumentNode:
+		for _, child := range node.Content {
+			collectYAMLStringSetters(child, setters, false)
+		}
+	case yaml.MappingNode:
+		for i := 0; i < len(node.Content); i += 2 {
+			keyNode := node.Content[i]
+			valueNode := node.Content[i+1]
+			collectYAMLStringSetters(keyNode, setters, true)
+			collectYAMLStringSetters(valueNode, setters, false)
+		}
+	case yaml.SequenceNode:
+		for _, child := range node.Content {
+			collectYAMLStringSetters(child, setters, false)
+		}
+	case yaml.ScalarNode:
+		if !isKey && node.Tag == "!!str" {
+			original := node.Value
+			*setters = append(*setters, stringSetter{
+				original: original,
+				set: func(newVal string) {
+					node.Value = newVal
+				},
+			})
+		}
+	}
+}
+
+func (t *Translator) applyTranslationsToSetters(targetLanguage string, setters []stringSetter) error {
+	if len(setters) == 0 {
+		return nil
+	}
+
+	textsToTranslate := make([]string, 0, len(setters))
+	translateIndices := make([]int, 0, len(setters))
+	for i, setter := range setters {
+		if strings.TrimSpace(setter.original) != "" {
+			textsToTranslate = append(textsToTranslate, setter.original)
+			translateIndices = append(translateIndices, i)
+		}
+	}
+
+	if len(textsToTranslate) == 0 {
+		return nil
+	}
+
+	translations, err := t.translateBatch(targetLanguage, textsToTranslate, "nmt")
+	if err != nil {
+		return err
+	}
+	if len(translations) != len(textsToTranslate) {
+		return fmt.Errorf("translation count mismatch: expected %d, got %d", len(textsToTranslate), len(translations))
+	}
+
+	for i, setterIdx := range translateIndices {
+		fixed := t.applyPostTranslationFixes(setters[setterIdx].original, translations[i])
+		setters[setterIdx].set(fixed)
+	}
+
+	return nil
+}
+
+func (t *Translator) translateJSONFile(targetLanguage, readFile, writeFile string) error {
+	data, err := os.ReadFile(readFile)
+	if err != nil {
+		return fmt.Errorf("failed to read json file %s: %w", readFile, err)
+	}
+
+	var payload interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return fmt.Errorf("failed to parse json file %s: %w", readFile, err)
+	}
+
+	setters := make([]stringSetter, 0)
+	collectStringSetters(payload, &setters)
+
+	if err := t.applyTranslationsToSetters(targetLanguage, setters); err != nil {
+		return fmt.Errorf("failed translating json file %s: %w", readFile, err)
+	}
+
+	encoded, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to encode json file %s: %w", writeFile, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(writeFile), 0o755); err != nil {
+		return fmt.Errorf("failed to create directory for %s: %w", writeFile, err)
+	}
+
+	if err := os.WriteFile(writeFile, encoded, 0o644); err != nil {
+		return fmt.Errorf("failed to write json file %s: %w", writeFile, err)
+	}
+
+	return nil
+}
+
+func (t *Translator) translateYAMLFile(targetLanguage, readFile, writeFile string) error {
+	data, err := os.ReadFile(readFile)
+	if err != nil {
+		return fmt.Errorf("failed to read yaml file %s: %w", readFile, err)
+	}
+
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil {
+		return fmt.Errorf("failed to parse yaml file %s: %w", readFile, err)
+	}
+
+	setters := make([]stringSetter, 0)
+	collectYAMLStringSetters(&node, &setters, false)
+
+	if err := t.applyTranslationsToSetters(targetLanguage, setters); err != nil {
+		return fmt.Errorf("failed translating yaml file %s: %w", readFile, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(writeFile), 0o755); err != nil {
+		return fmt.Errorf("failed to create directory for %s: %w", writeFile, err)
+	}
+
+	file, err := os.Create(writeFile)
+	if err != nil {
+		return fmt.Errorf("failed to create yaml file %s: %w", writeFile, err)
+	}
+	defer file.Close()
+
+	encoder := yaml.NewEncoder(file)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(&node); err != nil {
+		return fmt.Errorf("failed to encode yaml file %s: %w", writeFile, err)
+	}
+	if err := encoder.Close(); err != nil {
+		return fmt.Errorf("failed to close yaml encoder for %s: %w", writeFile, err)
+	}
+
+	return nil
+}
+
+func (t *Translator) translateTOMLFile(targetLanguage, readFile, writeFile string) error {
+	data, err := os.ReadFile(readFile)
+	if err != nil {
+		return fmt.Errorf("failed to read toml file %s: %w", readFile, err)
+	}
+
+	var payload interface{}
+	if err := toml.Unmarshal(data, &payload); err != nil {
+		return fmt.Errorf("failed to parse toml file %s: %w", readFile, err)
+	}
+
+	setters := make([]stringSetter, 0)
+	collectStringSetters(payload, &setters)
+
+	if err := t.applyTranslationsToSetters(targetLanguage, setters); err != nil {
+		return fmt.Errorf("failed translating toml file %s: %w", readFile, err)
+	}
+
+	encoded, err := toml.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to encode toml file %s: %w", writeFile, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(writeFile), 0o755); err != nil {
+		return fmt.Errorf("failed to create directory for %s: %w", writeFile, err)
+	}
+
+	if err := os.WriteFile(writeFile, encoded, 0o644); err != nil {
+		return fmt.Errorf("failed to write toml file %s: %w", writeFile, err)
+	}
+
+	return nil
+}
+
+func (t *Translator) getDataFiles(from string, dataPath string, lang string) error {
+	sourceRoot := filepath.Join(dataPath, from)
+	info, err := os.Stat(sourceRoot)
+	if err != nil || !info.IsDir() {
+		return nil
+	}
+
+	return filepath.WalkDir(sourceRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+
+		rel, err := filepath.Rel(sourceRoot, path)
+		if err != nil {
+			return fmt.Errorf("failed to compute relative path for %s: %w", path, err)
+		}
+
+		targetPath := filepath.Join(dataPath, lang, rel)
+		if _, err := os.Stat(targetPath); err == nil {
+			return nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".md":
+			log.Printf("Translating data markdown: %s -> %s", path, targetPath)
+			return t.doXlate(from, lang, path, targetPath)
+		case ".json":
+			log.Printf("Translating data json: %s -> %s", path, targetPath)
+			return t.translateJSONFile(lang, path, targetPath)
+		case ".yaml", ".yml":
+			log.Printf("Translating data yaml: %s -> %s", path, targetPath)
+			return t.translateYAMLFile(lang, path, targetPath)
+		case ".toml":
+			log.Printf("Translating data toml: %s -> %s", path, targetPath)
+			return t.translateTOMLFile(lang, path, targetPath)
+		default:
+			return nil
+		}
+	})
+}
+
+func findDataDirectory(basePath string) string {
+	dataPath := filepath.Join(basePath, "data")
+	if info, err := os.Stat(dataPath); err == nil && info.IsDir() {
+		return dataPath
+	}
+
+	if filepath.Base(basePath) == "content" {
+		parentData := filepath.Join(filepath.Dir(basePath), "data")
+		if info, err := os.Stat(parentData); err == nil && info.IsDir() {
+			return parentData
+		}
+	}
+
+	return ""
+}
+
 // addReadingTime adds reading time to front matter if not present
 func addReadingTime(file string) error {
 	f, err := os.ReadFile(file)
@@ -666,16 +952,24 @@ func main() {
 		log.Fatalf("Failed to stat path %s: %v", dir, err)
 	}
 
+	dataDir := ""
+	if fi.IsDir() {
+		dataDir = findDataDirectory(dir)
+	}
+
 	// Process languages sequentially to avoid rate limiting
 	var errors []error
 
 	for _, lang := range targetLanguages {
 		targetLang := lang
-		
+
 		var err error
 		switch mode := fi.Mode(); {
 		case mode.IsDir():
 			err = translator.getFile(config.DefaultLanguage, dir, targetLang, fileNames)
+			if err == nil && dataDir != "" {
+				err = translator.getDataFiles(config.DefaultLanguage, dataDir, targetLang)
+			}
 		case mode.IsRegular():
 			fileName := filepath.Base(dir)
 			dirPath := filepath.Dir(dir)
@@ -699,7 +993,7 @@ func main() {
 		if err != nil {
 			errors = append(errors, fmt.Errorf("language %s: %w", targetLang, err))
 		}
-		
+
 		// Small delay between language translations to avoid API rate limits
 		if len(targetLanguages) > 1 {
 			time.Sleep(500 * time.Millisecond)

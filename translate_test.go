@@ -1,12 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/pelletier/go-toml/v2"
+	"gopkg.in/yaml.v3"
 )
 
 // createMockTranslator creates a translator instance without a real client for testing
@@ -31,6 +35,23 @@ func createMockTranslator() *Translator {
 	}
 
 	return t
+}
+
+func createMockTranslatorWithBatch() *Translator {
+	translator := createMockTranslator()
+	translator.batchTranslate = func(targetLanguage string, texts []string, model string) ([]string, error) {
+		results := make([]string, len(texts))
+		for i, text := range texts {
+			if strings.TrimSpace(text) == "" {
+				results[i] = ""
+				continue
+			}
+			results[i] = fmt.Sprintf("%s:%s", targetLanguage, text)
+		}
+		return results, nil
+	}
+
+	return translator
 }
 
 func TestIsValueInList(t *testing.T) {
@@ -320,8 +341,8 @@ This is some content without front matter.`,
 			expectError: true,
 		},
 		{
-			name: "empty file",
-			content: ``,
+			name:        "empty file",
+			content:     ``,
 			expectError: true,
 		},
 		{
@@ -626,6 +647,231 @@ func TestConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestTranslateJSONFile(t *testing.T) {
+	translator := createMockTranslatorWithBatch()
+
+	rootDir := t.TempDir()
+	readFile := filepath.Join(rootDir, "data", "en", "sample.json")
+	writeFile := filepath.Join(rootDir, "data", "es", "sample.json")
+	if err := os.MkdirAll(filepath.Dir(readFile), 0755); err != nil {
+		t.Fatalf("Failed to create source directory: %v", err)
+	}
+
+	input := `{
+  "title": "Hello",
+  "nested": {"desc": "World"},
+  "count": 2,
+  "items": ["One", "Two"],
+  "flags": [true, false]
+}`
+	if err := os.WriteFile(readFile, []byte(input), 0644); err != nil {
+		t.Fatalf("Failed to write json file: %v", err)
+	}
+
+	if err := translator.translateJSONFile("es", readFile, writeFile); err != nil {
+		t.Fatalf("translateJSONFile failed: %v", err)
+	}
+
+	data, err := os.ReadFile(writeFile)
+	if err != nil {
+		t.Fatalf("Failed to read translated json: %v", err)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("Failed to parse translated json: %v", err)
+	}
+
+	if payload["title"].(string) != "es:Hello" {
+		t.Errorf("Expected title to be translated, got %v", payload["title"])
+	}
+
+	nestedRaw, ok := payload["nested"]
+	if !ok || nestedRaw == nil {
+		t.Fatalf("Expected nested section in TOML output")
+	}
+
+	nested, ok := nestedRaw.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected nested to be a map, got %T", nestedRaw)
+	}
+
+	if nested["desc"].(string) != "es:World" {
+		t.Errorf("Expected nested.desc to be translated, got %v", nested["desc"])
+	}
+
+	itemsRaw, ok := payload["items"]
+	if !ok || itemsRaw == nil {
+		t.Fatalf("Expected items in TOML output")
+	}
+
+	switch items := itemsRaw.(type) {
+	case []interface{}:
+		if items[0].(string) != "es:One" || items[1].(string) != "es:Two" {
+			t.Errorf("Expected items to be translated, got %v", items)
+		}
+	case []string:
+		if items[0] != "es:One" || items[1] != "es:Two" {
+			t.Errorf("Expected items to be translated, got %v", items)
+		}
+	default:
+		t.Fatalf("Unexpected items type %T", itemsRaw)
+	}
+}
+
+func TestTranslateYAMLFile(t *testing.T) {
+	translator := createMockTranslatorWithBatch()
+
+	rootDir := t.TempDir()
+	readFile := filepath.Join(rootDir, "data", "en", "sample.yaml")
+	writeFile := filepath.Join(rootDir, "data", "es", "sample.yaml")
+	if err := os.MkdirAll(filepath.Dir(readFile), 0755); err != nil {
+		t.Fatalf("Failed to create source directory: %v", err)
+	}
+
+	input := `title: Hello
+nested:
+  desc: World
+items:
+  - One
+  - Two
+flags:
+  - true
+  - false
+`
+	if err := os.WriteFile(readFile, []byte(input), 0644); err != nil {
+		t.Fatalf("Failed to write yaml file: %v", err)
+	}
+
+	if err := translator.translateYAMLFile("es", readFile, writeFile); err != nil {
+		t.Fatalf("translateYAMLFile failed: %v", err)
+	}
+
+	data, err := os.ReadFile(writeFile)
+	if err != nil {
+		t.Fatalf("Failed to read translated yaml: %v", err)
+	}
+
+	var payload map[string]interface{}
+	if err := yaml.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("Failed to parse translated yaml: %v", err)
+	}
+
+	if payload["title"].(string) != "es:Hello" {
+		t.Errorf("Expected title to be translated, got %v", payload["title"])
+	}
+
+	nested := payload["nested"].(map[string]interface{})
+	if nested["desc"].(string) != "es:World" {
+		t.Errorf("Expected nested.desc to be translated, got %v", nested["desc"])
+	}
+
+	items := payload["items"].([]interface{})
+	if items[0].(string) != "es:One" || items[1].(string) != "es:Two" {
+		t.Errorf("Expected items to be translated, got %v", items)
+	}
+}
+
+func TestTranslateTOMLFile(t *testing.T) {
+	translator := createMockTranslatorWithBatch()
+
+	rootDir := t.TempDir()
+	readFile := filepath.Join(rootDir, "data", "en", "sample.toml")
+	writeFile := filepath.Join(rootDir, "data", "es", "sample.toml")
+	if err := os.MkdirAll(filepath.Dir(readFile), 0755); err != nil {
+		t.Fatalf("Failed to create source directory: %v", err)
+	}
+
+	input := `title = "Hello"
+items = ["One", "Two"]
+
+[nested]
+desc = "World"
+`
+	if err := os.WriteFile(readFile, []byte(input), 0644); err != nil {
+		t.Fatalf("Failed to write toml file: %v", err)
+	}
+
+	if err := translator.translateTOMLFile("es", readFile, writeFile); err != nil {
+		t.Fatalf("translateTOMLFile failed: %v", err)
+	}
+
+	data, err := os.ReadFile(writeFile)
+	if err != nil {
+		t.Fatalf("Failed to read translated toml: %v", err)
+	}
+
+	var payload map[string]interface{}
+	if err := toml.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("Failed to parse translated toml: %v", err)
+	}
+
+	if payload["title"].(string) != "es:Hello" {
+		t.Errorf("Expected title to be translated, got %v", payload["title"])
+	}
+
+	nested := payload["nested"].(map[string]interface{})
+	if nested["desc"].(string) != "es:World" {
+		t.Errorf("Expected nested.desc to be translated, got %v", nested["desc"])
+	}
+
+	items := payload["items"].([]interface{})
+	if items[0].(string) != "es:One" || items[1].(string) != "es:Two" {
+		t.Errorf("Expected items to be translated, got %v", items)
+	}
+}
+
+func TestGetDataFiles(t *testing.T) {
+	translator := createMockTranslatorWithBatch()
+
+	rootDir := t.TempDir()
+	dataDir := filepath.Join(rootDir, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "en", "nested"), 0755); err != nil {
+		t.Fatalf("Failed to create data directories: %v", err)
+	}
+
+	jsonFile := filepath.Join(dataDir, "en", "sample.json")
+	yamlFile := filepath.Join(dataDir, "en", "nested", "sample.yaml")
+	tomlFile := filepath.Join(dataDir, "en", "sample.toml")
+	mdFile := filepath.Join(dataDir, "en", "note.md")
+
+	if err := os.WriteFile(jsonFile, []byte(`{"title":"Hello"}`), 0644); err != nil {
+		t.Fatalf("Failed to write json file: %v", err)
+	}
+	if err := os.WriteFile(yamlFile, []byte("title: Hello\n"), 0644); err != nil {
+		t.Fatalf("Failed to write yaml file: %v", err)
+	}
+	if err := os.WriteFile(tomlFile, []byte("title = \"Hello\"\n"), 0644); err != nil {
+		t.Fatalf("Failed to write toml file: %v", err)
+	}
+	if err := os.WriteFile(mdFile, []byte("Hello data file"), 0644); err != nil {
+		t.Fatalf("Failed to write markdown file: %v", err)
+	}
+
+	if err := translator.getDataFiles("en", dataDir, "es"); err != nil {
+		t.Fatalf("getDataFiles failed: %v", err)
+	}
+
+	translatedJSON := filepath.Join(dataDir, "es", "sample.json")
+	translatedYAML := filepath.Join(dataDir, "es", "nested", "sample.yaml")
+	translatedTOML := filepath.Join(dataDir, "es", "sample.toml")
+	translatedMD := filepath.Join(dataDir, "es", "note.md")
+
+	for _, file := range []string{translatedJSON, translatedYAML, translatedTOML, translatedMD} {
+		if _, err := os.Stat(file); err != nil {
+			t.Fatalf("Expected translated file %s to exist: %v", file, err)
+		}
+	}
+
+	mdContent, err := os.ReadFile(translatedMD)
+	if err != nil {
+		t.Fatalf("Failed to read translated markdown: %v", err)
+	}
+	if !strings.Contains(string(mdContent), "es:Hello data file") {
+		t.Errorf("Expected markdown to be translated, got %q", string(mdContent))
+	}
+}
+
 func BenchmarkApplyPostTranslationFixes(b *testing.B) {
 	translator := createMockTranslator()
 	original := "Check [this link](https://example.com/path) for **more** info"
@@ -646,4 +892,3 @@ func BenchmarkIsValueInList(b *testing.B) {
 		isValueInList(value, list)
 	}
 }
-
